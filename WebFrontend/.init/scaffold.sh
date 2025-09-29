@@ -1,41 +1,65 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Scaffold CRA core template into authoritative workspace (idempotent)
+
 WORKSPACE="/home/kavia/workspace/code-generation/recipe-finding-app-98606-98491/WebFrontend"
-mkdir -p "$WORKSPACE"
-# If already scaffolded, exit cleanly
-if [ -f "$WORKSPACE/package.json" ] && [ -d "$WORKSPACE/src" ]; then
-  exit 0
-fi
-TMPDIR=$(mktemp -d)
-LOG="$WORKSPACE/.scaffold.log"
-cd "$TMPDIR"
-# Prefer installed create-react-app
-if command -v create-react-app >/dev/null 2>&1; then
-  create-react-app . --use-npm >"$LOG" 2>&1 || { tail -n 200 "$LOG" >&2; rm -rf "$TMPDIR"; exit 7; }
-else
-  # attempt pinned npx fallback but fail fast if network unavailable
-  if curl -sSf --head https://www.npmjs.com/ >/dev/null 2>&1; then
-    npx --yes create-react-app@5.0.1 . --use-npm >"$LOG" 2>&1 || { tail -n 200 "$LOG" >&2; rm -rf "$TMPDIR"; exit 8; }
-  else
-    echo "create-react-app not available and network unreachable for npx fallback" >&2
-    rm -rf "$TMPDIR"
-    exit 9
-  fi
-fi
-# Validate react-scripts presence using node (avoid jq dependency)
-node -e "const p=require('./package.json'); if(!((p.dependencies&&p.dependencies['react-scripts'])||(p.devDependencies&&p.devDependencies['react-scripts']))){console.error('react-scripts missing in generated package.json'); process.exit(1);}"
-# Move into workspace, preserve existing files, exclude .git
-rsync -a --exclude='.git' --delete ./ "$WORKSPACE/"
-rm -rf "$TMPDIR"
 cd "$WORKSPACE"
-# Initialize git if missing
-if [ ! -d .git ]; then
-  GIT_NAME=${GIT_COMMITTER_NAME:-"autobot"}
-  GIT_EMAIL=${GIT_COMMITTER_EMAIL:-"autobot@example.com"}
-  git init >/dev/null 2>&1 || true
-  git config user.name "$GIT_NAME" || true
-  git config user.email "$GIT_EMAIL" || true
-  git add -A >/dev/null 2>&1 || true
-  git commit -m "scaffold: initial CRA" >/dev/null 2>&1 || true
+# If project already scaffolded, nothing to do
+[ -f "$WORKSPACE/package.json" ] && exit 0
+
+export CI=1 BROWSER=none
+CREATE_TOOL=${CREATE_TOOL:-cra}
+YARN_PREF=0
+[ "${YARN:-0}" = "1" ] && YARN_PREF=1
+[ -f "$WORKSPACE/yarn.lock" ] && YARN_PREF=1
+
+RETRY=0
+MAX_RETRY=2
+sleep_backoff(){ sleep $((2**$1)); }
+LOG=/tmp/webfrontend_scaffold.log
+: > "$LOG"
+
+if [ "$CREATE_TOOL" = "vite" ]; then
+  # prefer npm exec (modern) but allow npx fallback
+  until (command -v npm >/dev/null 2>&1 && npm exec --yes create-vite@latest -- . -- --template react >/tmp/webfrontend_scaffold.log 2>&1) || (command -v npx >/dev/null 2>&1 && npx --yes create-vite@latest . -- --template react >/tmp/webfrontend_scaffold.log 2>&1); do
+    RETRY=$((RETRY+1)) || true
+    if [ "$RETRY" -gt "$MAX_RETRY" ]; then
+      echo "vite scaffold failed; see $LOG" >&2
+      sed -n '1,200p' "$LOG" >&2 || true
+      exit 4
+    fi
+    sleep_backoff "$RETRY"
+  done
+else
+  CRA_VER=${CREATE_REACT_APP_VERSION:-latest}
+  # prefer yarn when requested; but we use --use-npm to force npm if needed per original script
+  # use npx if available otherwise npm exec
+  until (command -v npx >/dev/null 2>&1 && npx --yes create-react-app@${CRA_VER} . --use-npm --skip-install >/tmp/webfrontend_scaffold.log 2>&1) || (command -v npm >/dev/null 2>&1 && npm exec --yes create-react-app@${CRA_VER} -- . --use-npm --skip-install >/tmp/webfrontend_scaffold.log 2>&1); do
+    RETRY=$((RETRY+1)) || true
+    if [ "$RETRY" -gt "$MAX_RETRY" ]; then
+      echo "create-react-app scaffold failed; see $LOG" >&2
+      sed -n '1,200p' "$LOG" >&2 || true
+      exit 5
+    fi
+    sleep_backoff "$RETRY"
+  done
 fi
+
+# Verify package.json was created
+if [ ! -f "$WORKSPACE/package.json" ]; then
+  echo "scaffold failed: package.json missing" >&2
+  sed -n '1,200p' "$LOG" >&2 || true
+  exit 6
+fi
+
+# Create minimal .env if not present
+if [ ! -f "$WORKSPACE/.env" ]; then
+  cat > "$WORKSPACE/.env" <<EOF
+# Example environment variables
+REACT_APP_API_URL=http://localhost:3001
+EOF
+fi
+
+# Record which tool was used
+echo "SCAFFOLD_TOOL=$CREATE_TOOL" > /tmp/webfrontend_scaffold_tool.txt
+# Minimal success output
+echo "scaffold: OK (tool=$CREATE_TOOL)"

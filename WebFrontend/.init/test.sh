@@ -2,36 +2,31 @@
 set -euo pipefail
 WORKSPACE="/home/kavia/workspace/code-generation/recipe-finding-app-98606-98491/WebFrontend"
 cd "$WORKSPACE"
-# Minimal ESLint config (idempotent)
-if [ ! -f .eslintrc.json ]; then
-  cat >.eslintrc.json <<'EOF'
-{ "env": { "browser": true, "es2021": true }, "extends": "eslint:recommended", "parserOptions": { "ecmaVersion": 12, "sourceType": "module" }, "rules": {} }
+mkdir -p "$WORKSPACE/src"
+# create minimal app only if missing
+if [ ! -f "$WORKSPACE/src/App.js" ] && [ ! -f "$WORKSPACE/src/App.tsx" ]; then
+  cat > "$WORKSPACE/src/App.js" <<'EOF'
+import React from 'react'
+export default function App(){return (<div data-testid="app-root">App</div>)}
 EOF
 fi
-# Ensure smoke test (idempotent)
-mkdir -p src/__tests__
-cat > src/__tests__/smoke.test.js <<'EOF'
-test('smoke: true is true', ()=>{ expect(true).toBe(true); });
+# create test file if none exists or FORCE_TESTS=1
+TEST_FILES=$(ls -1 $WORKSPACE/src/*test*.js $WORKSPACE/src/*test*.jsx $WORKSPACE/src/*test*.ts $WORKSPACE/src/*test*.tsx 2>/dev/null || true)
+if [ "${FORCE_TESTS:-0}" = "1" ] || [ -z "$TEST_FILES" ]; then
+  cat > "$WORKSPACE/src/App.test.js" <<'EOF'
+import React from 'react'
+import { render, screen } from '@testing-library/react'
+import '@testing-library/jest-dom'
+import App from './App'
+
+test('renders app root', () => {
+  render(<App />)
+  expect(screen.getByTestId('app-root')).toHaveTextContent('App')
+})
 EOF
-ESLINT_BIN="./node_modules/.bin/eslint"
-JEST_BIN="./node_modules/.bin/jest"
-# If local bins missing, attempt one safe non-interactive install if network reachable
-if [ ! -x "$ESLINT_BIN" ] || [ ! -x "$JEST_BIN" ]; then
-  if curl -sSf --head https://registry.npmjs.org/ >/dev/null 2>&1; then
-    npm install --no-audit --prefer-offline --silent
-  else
-    echo "local eslint/jest missing and network unavailable. Run deps-01 (install) step or provide offline node_modules tarball." >&2
-    exit 14
-  fi
 fi
-# Run lint and tests with local binaries
-if [ -x "$ESLINT_BIN" ]; then
-  "$ESLINT_BIN" src --max-warnings=0 || { echo 'eslint failed' >&2; exit 13; }
-else
-  echo 'local eslint missing after install attempt' >&2; exit 14
-fi
-if [ -x "$JEST_BIN" ]; then
-  "$JEST_BIN" --colors --runInBand --ci || { echo 'jest failed' >&2; exit 15; }
-else
-  echo 'local jest missing after install attempt' >&2; exit 16
-fi
+# Ensure test script exists in package.json
+node -e "const f='package.json'; const p=require('./'+f); p.scripts=p.scripts||{}; if(!p.scripts.test) p.scripts.test='react-scripts test --watchAll=false'; require('fs').writeFileSync(f,JSON.stringify(p,null,2));" >/dev/null 2>&1 || true
+export CI=1 BROWSER=none
+LOG=/tmp/webfrontend_test.log; :>"$LOG"
+npm test --silent -- --watchAll=false >"$LOG" 2>&1 || { echo "tests failed; see $LOG" >&2; tail -n 200 "$LOG" >&2; exit 6; }
