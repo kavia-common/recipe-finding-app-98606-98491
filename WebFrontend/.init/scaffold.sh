@@ -1,41 +1,50 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Scaffold CRA core template into authoritative workspace (idempotent)
 WORKSPACE="/home/kavia/workspace/code-generation/recipe-finding-app-98606-98491/WebFrontend"
-mkdir -p "$WORKSPACE"
-# If already scaffolded, exit cleanly
-if [ -f "$WORKSPACE/package.json" ] && [ -d "$WORKSPACE/src" ]; then
+cd "$WORKSPACE"
+# If repo already has obvious app files, do not scaffold
+if [ -d src ] || [ -d public ] || [ -f index.html ] || ( [ -f package.json ] && node -e "const p=require('./package.json'); process.exit(p.scripts&&Object.keys(p.scripts).length?0:1)" >/dev/null 2>&1 ); then
   exit 0
 fi
-TMPDIR=$(mktemp -d)
-LOG="$WORKSPACE/.scaffold.log"
-cd "$TMPDIR"
-# Prefer installed create-react-app
+mkdir -p .scaffold_backup || true
+TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+stash_fail(){ tar -czf ".scaffold_backup/partial_$TIMESTAMP.tar.gz" . --exclude .scaffold_backup || true; }
+SCAFFOLD_TYPE=""
+LOG=/tmp/webfrontend_scaffold.log
+# Try local CRA
 if command -v create-react-app >/dev/null 2>&1; then
-  create-react-app . --use-npm >"$LOG" 2>&1 || { tail -n 200 "$LOG" >&2; rm -rf "$TMPDIR"; exit 7; }
-else
-  # attempt pinned npx fallback but fail fast if network unavailable
-  if curl -sSf --head https://www.npmjs.com/ >/dev/null 2>&1; then
-    npx --yes create-react-app@5.0.1 . --use-npm >"$LOG" 2>&1 || { tail -n 200 "$LOG" >&2; rm -rf "$TMPDIR"; exit 8; }
-  else
-    echo "create-react-app not available and network unreachable for npx fallback" >&2
-    rm -rf "$TMPDIR"
-    exit 9
+  if create-react-app . --use-npm --no-analytics --silent >"$LOG" 2>&1; then SCAFFOLD_TYPE="cra"; fi
+fi
+# Fallback to npx --yes create-react-app
+if [ -z "$SCAFFOLD_TYPE" ] && command -v npx >/dev/null 2>&1; then
+  if npx --yes create-react-app . --use-npm --no-analytics --silent >"$LOG" 2>&1; then SCAFFOLD_TYPE="cra"; fi
+fi
+# Vite fallback: prefer npm create if available
+if [ -z "$SCAFFOLD_TYPE" ]; then
+  if command -v npm >/dev/null 2>&1 && npm create vite@latest . -- --template react --yes >"$LOG" 2>&1; then SCAFFOLD_TYPE="vite"; fi
+  if [ -z "$SCAFFOLD_TYPE" ]; then
+    if command -v npm >/dev/null 2>&1 && npm init vite@latest . -- --template react --yes >"$LOG" 2>&1; then SCAFFOLD_TYPE="vite"; fi
   fi
 fi
-# Validate react-scripts presence using node (avoid jq dependency)
-node -e "const p=require('./package.json'); if(!((p.dependencies&&p.dependencies['react-scripts'])||(p.devDependencies&&p.devDependencies['react-scripts']))){console.error('react-scripts missing in generated package.json'); process.exit(1);}"
-# Move into workspace, preserve existing files, exclude .git
-rsync -a --exclude='.git' --delete ./ "$WORKSPACE/"
-rm -rf "$TMPDIR"
-cd "$WORKSPACE"
-# Initialize git if missing
-if [ ! -d .git ]; then
-  GIT_NAME=${GIT_COMMITTER_NAME:-"autobot"}
-  GIT_EMAIL=${GIT_COMMITTER_EMAIL:-"autobot@example.com"}
-  git init >/dev/null 2>&1 || true
-  git config user.name "$GIT_NAME" || true
-  git config user.email "$GIT_EMAIL" || true
-  git add -A >/dev/null 2>&1 || true
-  git commit -m "scaffold: initial CRA" >/dev/null 2>&1 || true
+if [ -z "$SCAFFOLD_TYPE" ]; then
+  stash_fail || true
+  echo "ERROR: scaffolding failed; see $LOG" >&2
+  exit 6
 fi
+# Create minimal Upload component
+mkdir -p src/components || true
+cat > src/components/Upload.jsx <<'COMP'
+import React from 'react';
+export default function Upload(){
+  return (<input type="file" accept="image/*" data-testid="file-input"/>);
+}
+COMP
+# Small README
+cat > README.md <<MD
+# WebFrontend
+Scaffold: ${SCAFFOLD_TYPE}
+Headless: use HOST=0.0.0.0 PORT and NODE_ENV environment variables. Start with: npm start (CRA) or npm run dev (Vite).
+MD
+
+# Success
+exit 0

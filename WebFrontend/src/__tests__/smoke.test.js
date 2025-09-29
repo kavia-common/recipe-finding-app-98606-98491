@@ -1,1 +1,1 @@
-test('smoke: true is true', ()=>{ expect(true).toBe(true); });
+test('smoke-basic', ()=>{ expect(2+2).toBe(4); });
