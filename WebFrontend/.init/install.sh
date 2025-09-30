@@ -1,31 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Install and validate frontend deps non-interactively
 WORKSPACE="/home/kavia/workspace/code-generation/recipe-finding-app-98606-98491/WebFrontend"
 cd "$WORKSPACE"
-[ -f package.json ] || { echo "package.json missing; run scaffold first" >&2; exit 10; }
-# Use deterministic install when lockfile present
+[ -f package.json ] || { echo "error: package.json missing" >&2; exit 2; }
+# Prefer deterministic install when package-lock.json exists
 if [ -f package-lock.json ]; then
-  npm ci --no-audit --prefer-offline --silent
+  npm ci --no-audit --no-fund || { echo "npm ci failed" >&2; exit 3; }
+  echo "deps installed via npm ci"
+  exit 0
+fi
+# Otherwise install and create package-lock.json
+npm install --no-audit --no-fund || { echo "npm install failed" >&2; exit 4; }
+# Ensure react/react-dom exist (check both dependencies and devDependencies)
+node -e "try{const p=require('./package.json'); const deps=Object.assign({},p.dependencies||{},p.devDependencies||{}); if(!deps.react) process.exit(2);}catch(e){process.exit(1)}" || {
+  npm i --no-audit --no-fund react@^18.2.0 react-dom@^18.2.0 || { echo 'npm install react failed' >&2; exit 5; }
+}
+# Ensure vitest (dev dependency) is present
+node -e "try{const p=require('./package.json'); const d=p.devDependencies||{}; process.exit(d.vitest?0:1);}catch(e){process.exit(1)}" >/dev/null 2>&1 || npm i --no-audit --no-fund -D vitest jsdom @testing-library/react || { echo 'npm install vitest failed' >&2; exit 6; }
+# Detect serve-style scripts and install serve as devDependency if needed
+HAS_SERVE_SCRIPT=1
+node -e "try{const p=require('./package.json'); const s=p.scripts||{}; process.exit((s.serve||s['serve-build'])?0:2);}catch(e){process.exit(1)}" || HAS_SERVE_SCRIPT=2
+if [ "$HAS_SERVE_SCRIPT" -eq 1 ]; then
+  npm i --no-audit --no-fund -D serve || { echo 'npm install serve failed' >&2; exit 7; }
+fi
+# Verify test runner availability
+if [ -f node_modules/.bin/vitest ] || command -v jest >/dev/null 2>&1; then
+  echo "deps ok"
 else
-  npm install --no-audit --prefer-offline --silent
+  echo "error: no test runner available" >&2; exit 8
 fi
-# Add minimal devDependencies only if absent; node prints UPDATED when package.json changed
-CHANGED_MARKER=$(node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.devDependencies=p.devDependencies||{};let changed=false;const ensure=(k,v)=>{if(!p.devDependencies[k]){p.devDependencies[k]=v;changed=true}};ensure('serve','14.2.0');ensure('eslint','8.0.0');ensure('jest','29.0.0');ensure('browser-image-resizer','0.12.0');if(changed){fs.writeFileSync('package.json',JSON.stringify(p,null,2));console.log('UPDATED')}") || true
-if [ "${CHANGED_MARKER}" = "UPDATED" ]; then
-  npm install --no-audit --prefer-offline --silent
-fi
-# Ensure minimal scripts exist (idempotent)
-node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.scripts=p.scripts||{};p.scripts.start=p.scripts.start||'react-scripts start';p.scripts.build=p.scripts.build||'react-scripts build';p.scripts.test=p.scripts.test||'jest --colors';p.scripts['serve:static']=p.scripts['serve:static']||'serve -s build -l \"$PORT\"';fs.writeFileSync('package.json',JSON.stringify(p,null,2));" >/dev/null
-# Create dev storage directories (idempotent)
-mkdir -p "$WORKSPACE/dev_uploads" "$WORKSPACE/mock_s3"
-# Validate required runtime binaries exist locally
-if [ ! -x "$WORKSPACE/node_modules/.bin/react-scripts" ]; then
-  echo "react-scripts binary missing; re-run npm ci or check package-lock.json" >&2
-  exit 11
-fi
-if [ ! -x "$WORKSPACE/node_modules/.bin/eslint" ] || [ ! -x "$WORKSPACE/node_modules/.bin/jest" ]; then
-  echo "eslint or jest not installed locally; they were added to devDependencies and npm install should have installed them" >&2
-  exit 12
-fi
-# Success - print concise confirmation
-echo "dependencies installed and dev tools pinned; dev_uploads and mock_s3 ensured"
